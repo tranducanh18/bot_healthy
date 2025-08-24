@@ -138,16 +138,18 @@ def health_check():
         print(f"Error in health check: {e}")
         return jsonify({"error": str(e)}), 500
 
-
+import os
 
 if __name__ == "__main__":
     try:
+        port = int(os.environ.get("PORT", 8080))
         app.run(
             host="0.0.0.0", 
-            port=5000,
+            port=port,
             debug=True,
             threaded=True,
             use_reloader=False
         )
+
     except Exception as e:
         sys.exit(1)
