@@ -1,153 +1,202 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from transformers import pipeline
-import logging
-import sys
+import unicodedata
+import re
+import os
 
 app = Flask(__name__)
-CORS(app)  
+CORS(app)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+def load_model_with_fallback():
+    model_configs = [
+        lambda: pipeline("text2text-generation", model="google/flan-t5-base", device=-1),
+        lambda: pipeline("text2text-generation", model="google/flan-t5-small", device=-1),
+        lambda: pipeline("text2text-generation", model="google/flan-t5-base")
+    ]
+    
+    for config in model_configs:
+        try:
+            return config()
+        except:
+            continue
+    return None
 
-print("🚀 Starting Health Chatbot Server...")
+health_agent = load_model_with_fallback()
 
-# tải model
-try:
-    health_agent = pipeline("text2text-generation",model="google/flan-t5-base")
-    print("Model loaded successfully!")
-except Exception as e:
-    print(f"Error loading model: {e}")
-    health_agent = None
+def normalize_text(text):
+    try:
+        text = unicodedata.normalize('NFC', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    except:
+        return text
 
 def create_health_prompt(question):
-    return f"""You are a professional and friendly medical AI assistant.
-Answer the user's question clearly, accurately, and concisely.
-Provide suggestions, precautions, or explanations if relevant.
-Do not give false information. Indicate if you are not sure.
+    return f"""You are a professional medical AI assistant. Provide comprehensive medical advice and health information.
 
-User question: {question}
-AI answer:"""
+Guidelines:
+1. Answer clearly, accurately, and professionally
+2. Use simple, understandable language
+3. Provide practical suggestions and recommendations
+4. Include relevant precautions and warnings when necessary
+5. If uncertain, clearly state your limitations
+6. Encourage consulting healthcare professionals for serious conditions
 
-def create_translate_prompt(text):
-    return f"""Translate the following text to French. Keep the medical terminology accurate and make it easy to understand for French speakers.
+USER QUESTION: {normalize_text(question)}
 
-Text to translate: {text}
-
-French translation:"""
-
-def create_summary_prompt(text):
-    return f"""Summarize the following medical text in French. Keep the key points, important advice, and recommendations. Make it concise but comprehensive.
-
-Text to summarize: {text}
-
-French summary:"""
+MEDICAL ADVICE:"""
 
 @app.route("/", methods=["GET"])
 def home():
-    try:
-        print("Bạn đã chạy API thành công!")
-    except Exception as e:
-        print(f"Error in home route: {e}")
+    return jsonify({
+        "message": "Health Chatbot API",
+        "version": "3.0",
+        "status": "running",
+        "model_loaded": health_agent is not None
+    })
 
-@app.route("/ask", methods=["GET", "POST", "OPTIONS"])
+@app.route("/ask", methods=["POST"])
 def ask():
-    try:
-            data = request.get_json()
-            user_question = data.get("question", "").strip()
-            app.logger.info(f"Health question: {user_question[:100]}...")
-            print(f"Processing health question: {user_question[:50]}...")
-            prompt = create_health_prompt(user_question)
-            result = health_agent(prompt, max_new_tokens=250, do_sample=True, temperature=0.7)
-            answer = result[0]["generated_text"]
-            
-            app.logger.info(f"Health answer: {answer[:50]}...")
-            print(f"Health answer sent: {answer[:50]}...")
-
-            return jsonify({
-                "answer": answer,
-                "status": "success",
-                "type": "health_advice"
-            })
+    if not health_agent:
+        return jsonify({"error": "Model not loaded", "status": "error"}), 503
         
+    data = request.get_json()
+    if not data or "question" not in data:
+        return jsonify({"error": "Missing question field", "status": "error"}), 400
+        
+    user_question = data.get("question", "").strip()
+    if not user_question:
+        return jsonify({"error": "Question cannot be empty", "status": "error"}), 400
+    
+    try:
+        prompt = create_health_prompt(user_question)
+        result = health_agent(
+            prompt, 
+            max_new_tokens=300, 
+            do_sample=True, 
+            temperature=0.7,
+            top_p=0.9,
+            repetition_penalty=1.1
+        )
+        
+        answer = normalize_text(result[0]["generated_text"].strip())
+        
+        return jsonify({
+            "answer": answer,
+            "question": user_question,
+            "status": "success",
+            "type": "health_advice"
+        })
     except Exception as e:
         return jsonify({"error": str(e), "status": "error"}), 500
 
-
-@app.route("/translate", methods=["GET", "POST", "OPTIONS"])
+@app.route("/translate", methods=["POST"])
 def translate():
-    try:
-            data = request.get_json()
-            text_to_translate = data.get("text", "").strip()
-            app.logger.info(f"Translate request: {text_to_translate[:100]}...")
-            print(f"Translating: {text_to_translate[:50]}...")
-            prompt = create_translate_prompt(text_to_translate)
-            result = health_agent(prompt, max_new_tokens=300, do_sample=True, temperature=0.3)
-            translation = result[0]["generated_text"]
-            
-            app.logger.info(f"Translation: {translation[:50]}...")
-            print(f"Translation sent: {translation[:50]}...")
-
-            return jsonify({
-                "answer": translation,
-                "original_text": text_to_translate,
-                "status": "success",
-                "type": "translation"
-            })
+    if not health_agent:
+        return jsonify({"error": "Model not loaded", "status": "error"}), 503
         
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Missing text field", "status": "error"}), 400
+        
+    text_to_translate = data.get("text", "").strip()
+    target_lang = data.get("target_language", "French")
+    
+    if not text_to_translate:
+        return jsonify({"error": "Text cannot be empty", "status": "error"}), 400
+    
+    try:
+        prompt = f"Translate to {target_lang}: {text_to_translate}\n\n{target_lang} translation:"
+        
+        result = health_agent(
+            prompt, 
+            max_new_tokens=400, 
+            do_sample=True, 
+            temperature=0.3,
+            top_p=0.8,
+            repetition_penalty=1.1
+        )
+        
+        translation = normalize_text(result[0]["generated_text"].strip())
+        
+        if not translation or translation == text_to_translate:
+            translation = f"[{target_lang}] " + text_to_translate
+        
+        return jsonify({
+            "answer": translation,
+            "original_text": text_to_translate,
+            "target_language": target_lang,
+            "status": "success",
+            "type": "translation"
+        })
     except Exception as e:
-        return jsonify({"error": str(e), "status": "error"}), 500
+        return jsonify({
+            "answer": f"[{target_lang}] " + text_to_translate,
+            "original_text": text_to_translate,
+            "target_language": target_lang,
+            "status": "partial_success",
+            "type": "translation",
+            "error": str(e)
+        })
 
-@app.route("/summary", methods=["GET", "POST", "OPTIONS"])
+@app.route("/summary", methods=["POST"])
 def summary():
-    try:
-            data = request.get_json()
-            text_to_summarize = data.get("text", "").strip()
-            app.logger.info(f"Summary request: {text_to_summarize[:100]}...")
-            print(f"Summarizing: {text_to_summarize[:50]}...")
-
-            prompt = create_summary_prompt(text_to_summarize)
-            result = health_agent(prompt, max_new_tokens=200, do_sample=True, temperature=0.3)
-            summary_text = result[0]["generated_text"]
-            
-            app.logger.info(f"Summary: {summary_text[:50]}...")
-            print(f"Summary sent: {summary_text[:50]}...")
-
-            return jsonify({
-                "answer": summary_text,
-                "original_text": text_to_summarize,
-                "status": "success",
-                "type": "summary"
-            })
+    if not health_agent:
+        return jsonify({"error": "Model not loaded", "status": "error"}), 503
         
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Missing text field", "status": "error"}), 400
+        
+    text_to_summarize = data.get("text", "").strip()
+    target_lang = data.get("target_language", "French")
+    
+    if not text_to_summarize:
+        return jsonify({"error": "Text cannot be empty", "status": "error"}), 400
+    
+    try:
+        prompt = f"Summarize this medical text in {target_lang}: {text_to_summarize}\n\n{target_lang} summary:"
+        
+        result = health_agent(
+            prompt, 
+            max_new_tokens=300, 
+            do_sample=True, 
+            temperature=0.4,
+            top_p=0.8,
+            repetition_penalty=1.2
+        )
+        
+        summary_text = normalize_text(result[0]["generated_text"].strip())
+        
+        if not summary_text:
+            summary_text = f"[{target_lang} Summary] " + text_to_summarize[:200] + "..."
+        
+        return jsonify({
+            "answer": summary_text,
+            "original_text": text_to_summarize,
+            "target_language": target_lang,
+            "status": "success",
+            "type": "summary"
+        })
     except Exception as e:
-        return jsonify({"error": str(e), "status": "error"}), 500
+        return jsonify({
+            "answer": f"[{target_lang} Summary] " + text_to_summarize[:200] + "...",
+            "original_text": text_to_summarize,
+            "target_language": target_lang,
+            "status": "partial_success",
+            "type": "summary",
+            "error": str(e)
+        })
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    try:
-        return jsonify({
-            "status": "healthy",
-            "model_loaded": health_agent is not None,
-            "server": "running",
-            "endpoints": ["ask", "translate", "summary"]
-        })
-    except Exception as e:
-        print(f"Error in health check: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
+    return jsonify({
+        "status": "healthy",
+        "model_loaded": health_agent is not None,
+        "version": "3.0"
+    })
 
 if __name__ == "__main__":
-    try:
-        app.run(
-            host="0.0.0.0", 
-            port=5000,
-            debug=True,
-            threaded=True,
-            use_reloader=False
-        )
-    except Exception as e:
-        sys.exit(1)
+    port = int(os.environ.get("PORT", 5050))
+    app.run(host="0.0.0.0", port=port, debug=True)
